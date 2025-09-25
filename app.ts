@@ -26,7 +26,7 @@ function getLocalIP(): string {
 
 const localIP = getLocalIP();
 
-const PORT = 8080;
+const PORT = 3000;
 
 //คำสั่งรันserver npx nodemon server.ts
 
