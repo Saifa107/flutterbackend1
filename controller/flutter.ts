@@ -242,6 +242,45 @@ router.get("/searchAll",async(req,res)=>{
     res.status(500).json({ error: "Internal server error" });
   }
 });
+// แสดงทั้งหมด address ที่มี Y ทั้งหมด แต่ไม่ใช้ตัวเอง
+router.get("/searchU/:user_id", async (req, res) => { // ⬅️ รับ user_id ผ่าน URL Parameter
+  try {
+    const user_id_to_exclude = req.params.user_id; // ⬅️ ดึง user_id ของผู้ใช้ปัจจุบัน
+    
+    // 💡 Query สำหรับ Parcel (ถ้าไม่จำเป็นต้องใช้ ให้พิจารณาลบออกเพื่อเพิ่มประสิทธิภาพ)
+    const parcel = 'SELECT * FROM `parcel`';
+    const [parcelA] = await conn.query(parcel);
+
+    const search = `
+      SELECT 
+        u.user_id,
+        u.user_name,
+        u.user_phone,
+        u.user_proflie,
+        a.address_id,
+        a.address_text,
+        a.address_latitude,
+        a.address_longitude,
+        ua.choose
+      FROM user u
+      JOIN user_address ua ON u.user_id = ua.user_id
+      JOIN address a ON ua.address_id = a.address_id
+      WHERE ua.choose = 'Y' 
+      AND u.user_id != ?;`; // ⬅️ เพิ่มเงื่อนไข: user_id ต้องไม่เท่ากับ ID ที่ส่งมา
+
+    // 🎯 ส่ง user_id_to_exclude เข้าไปใน Query
+    const [rows] = await conn.query(search, [user_id_to_exclude]);
+
+    res.status(200).json({
+      parcelID: parcelA,
+      search: rows,
+    });
+  } catch (error) {
+    console.error("SearchU error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // ระบบ sreach ที่อยู่ กับ เบอร์โทร
 router.post("/search",async(req,res)=>{
   try{
@@ -279,47 +318,66 @@ router.post("/search",async(req,res)=>{
 //          ใส่รูปภาพ
 //////////
 ///ใส่ชื่อ+รูปภาพ
-router.post("/recevie/:parcel_id",async(req,res)=>{
+router.post("/recevie/:sender_id/:receiver_id",async(req,res)=>{
   try{
-    const parcel = req.params.parcel_id;
+    const sender = req.params.sender_id;
+    const receiver = req.params.receiver_id;
     const { d_name,image,address_id} = req.body;
-    if(!parcel||!d_name ||!image ||!address_id){
-      return res.status(400).json({ error: "Missing" });
+    
+    if(!sender || !receiver || !d_name || !image || !address_id){
+      return res.status(400).json({ error: "Missing sender, receiver, d_name, image, or address_id" });
     }
-    // ✅ 1. เพิ่มรูปเข้า photo_status
+    
+    // 1. ✅ INSERT ข้อมูลลงใน table `parcel`
+    //    (ละเว้น parcel_id เพราะเป็น AUTO_INCREMENT)
+    const sqlParcel = 'INSERT INTO `parcel`(`sender_id`, `receiver_id`) VALUES (?, ?)';
+    const [parcelInsertResult]: any = await conn.query<ResultSetHeader>(sqlParcel, [
+      sender,
+      receiver
+    ]);
+    
+    // 2. 🎯 ดึง parcel_id ที่ถูกสร้างขึ้นมาใหม่
+    const new_parcel_id = parcelInsertResult.insertId;
+
+    // 3. ✅ เพิ่มรูปเข้า photo_status
     const sqlPhoto = `
       INSERT INTO photo_status (photo_status_url, photo_status_tier)
       VALUES (?, 'waiting')
     `;
-    const [photoResult] = await conn.query<ResultSetHeader>(sqlPhoto, [image]);
+    const [photoResult]: any = await conn.query<ResultSetHeader>(sqlPhoto, [image]);
     const photo_status_id = photoResult.insertId;
 
-    // ✅ 2. เพิ่มข้อมูลเข้า delivery
+
+    // 4. ✅ เพิ่มข้อมูลเข้า delivery
     const sqlDelivery = `
       INSERT INTO delivery (parcel_id, rider_id, delivery_status, d_name, address_id)
       VALUES (?, NULL, 'waiting', ?, ?)
     `;
-    const [deliveryResult] = await conn.query<ResultSetHeader>(sqlDelivery, [
-      parcel,
+    // 🎯 ใช้ new_parcel_id ที่ได้จากการ INSERT ในขั้นตอนที่ 2
+    const [deliveryResult]: any = await conn.query<ResultSetHeader>(sqlDelivery, [
+      new_parcel_id, // ⬅️ ตัวแปรใหม่ที่ถูกต้อง
       d_name,
       address_id,
     ]);
     const delivery_id = deliveryResult.insertId;
 
-    // ✅ 3. เชื่อมข้อมูลใน delivery_photo_status
+
+    // 5. ✅ เชื่อมข้อมูลใน delivery_photo_status
     const sqlLink = `
       INSERT INTO delivery_photo_status (delivery_id, photo_status_id)
       VALUES (?, ?)
     `;
     await conn.query(sqlLink, [delivery_id, photo_status_id]);
 
-    // ✅ ตอบกลับ
+    // ✅ ตอบกลับ (เพิ่ม parcel_id ใน Response ด้วย)
     res.status(201).json({
       message: "Delivery and photo linked successfully",
       delivery_id,
+      parcel_id: new_parcel_id, // 💡 ส่ง Parcel ID กลับไปด้วย
       photo_status_id,
     });
   }catch(error){
+    console.error("Recevie API Error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -382,6 +440,192 @@ WHERE
       parcel_detail: rows,
     });
   }catch(error){
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+//////////
+//          รายการส่งสินค้า main
+//////////
+// รายการที่ส่งทั้งหมดของ user
+router.get("/main/:user_id",async(req,res)=>{
+  try{
+    const user = req.params.user_id;
+    if(!user){
+      return res.status(400).json({ error: "Missing user id" });
+    }
+    const sql = `SELECT
+    p.parcel_id,
+    d.delivery_id,
+    d.delivery_status,
+    d.d_name,
+    ps.photo_status_url,
+    ps.photo_status_tier
+FROM
+    parcel AS p
+INNER JOIN
+    delivery AS d 
+    ON p.parcel_id = d.parcel_id
+INNER JOIN
+    delivery_photo_status AS dps
+    ON d.delivery_id = dps.delivery_id
+INNER JOIN
+    photo_status AS ps
+    ON dps.photo_status_id = ps.photo_status_id
+WHERE
+    p.sender_id = ?;`;
+    const [sand] = await conn.query<ResultSetHeader>(sql, [user]);
+    res.status(200).json({
+      user_id: user,
+      parcel: sand,
+    });
+  }catch(error){
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+//serach ชื่อ กับ สถานะ
+router.post("/mainSearch/:user_id", async (req, res) => {
+  try {
+    const user = req.params.user_id;
+    
+    // 🎯 แก้ไขตรงนี้: ใช้ Destructuring เพื่อดึงค่า 'text' ออกมาจาก Object req.body
+    const { text } = req.body; 
+    
+    if (!user) {
+      return res.status(400).json({ error: "Missing user ID" });
+    }
+    
+    // 💡 สร้างตัวแปร search text ที่มี % ล้อมรอบ
+    const searchText = `%${text}%`; 
+
+    const search = `
+      SELECT
+        p.parcel_id,
+        d.delivery_id,
+        d.delivery_status,
+        d.d_name,
+        ps.photo_status_url,
+        ps.photo_status_tier
+      FROM
+        parcel AS p
+      INNER JOIN
+        delivery AS d 
+        ON p.parcel_id = d.parcel_id
+      INNER JOIN
+        delivery_photo_status AS dps
+        ON d.delivery_id = dps.delivery_id
+      INNER JOIN
+        photo_status AS ps
+        ON dps.photo_status_id = ps.photo_status_id
+      WHERE 
+        p.sender_id = ?
+        AND (d.d_name LIKE ? OR d.delivery_status LIKE ?);
+    `;
+    
+    // 🎯 ส่งตัวแปร searchText เข้าไป 2 ครั้ง (สำหรับ d_name และ delivery_status)
+    const [main] = await conn.query(search, [
+      user,
+      searchText,
+      searchText
+    ]);
+
+    res.status(200).json({
+      user_id: user,
+      parcel: main,
+    });
+  } catch (error) {
+    console.error("Search error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+//////////
+//          รายการของที่ต้องรับ
+//////////
+router.get("/getBox/:user_id",async(req,res)=>{
+  try{
+    const user = req.params.user_id;
+    if(!user){
+      return res.status(400).json({ error: "Missing user id" });
+    }
+    const sql = `SELECT
+    p.parcel_id,
+    d.delivery_id,
+    d.delivery_status,
+    d.d_name,
+    ps.photo_status_url,
+    ps.photo_status_tier
+FROM
+    parcel AS p
+INNER JOIN
+    delivery AS d 
+    ON p.parcel_id = d.parcel_id
+INNER JOIN
+    delivery_photo_status AS dps
+    ON d.delivery_id = dps.delivery_id
+INNER JOIN
+    photo_status AS ps
+    ON dps.photo_status_id = ps.photo_status_id
+WHERE
+    p.receiver_id = ?;`;
+    const [sand] = await conn.query<ResultSetHeader>(sql, [user]);
+    res.status(200).json({
+      user_id: user,
+      parcel: sand,
+    });
+  }catch(error){
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+//serach ชื่อ กับ สถานะ
+router.post("/getBoxSearch/:user_id", async (req, res) => {
+  try {
+    const user = req.params.user_id;
+    
+    // 🎯 แก้ไขตรงนี้: ใช้ Destructuring เพื่อดึงค่า 'text' ออกมาจาก Object req.body
+    const { text } = req.body; 
+    
+    if (!user) {
+      return res.status(400).json({ error: "Missing user ID" });
+    }
+    
+    // 💡 สร้างตัวแปร search text ที่มี % ล้อมรอบ
+    const searchText = `%${text}%`; 
+
+    const search = `
+      SELECT
+        p.parcel_id,
+        d.delivery_id,
+        d.delivery_status,
+        d.d_name,
+        ps.photo_status_url,
+        ps.photo_status_tier
+      FROM
+        parcel AS p
+      INNER JOIN
+        delivery AS d 
+        ON p.parcel_id = d.parcel_id
+      INNER JOIN
+        delivery_photo_status AS dps
+        ON d.delivery_id = dps.delivery_id
+      INNER JOIN
+        photo_status AS ps
+        ON dps.photo_status_id = ps.photo_status_id
+      WHERE 
+        p.receiver_id = ?
+        AND (d.d_name LIKE ? OR d.delivery_status LIKE ?);
+    `;
+    
+    // 🎯 ส่งตัวแปร searchText เข้าไป 2 ครั้ง (สำหรับ d_name และ delivery_status)
+    const [main] = await conn.query(search, [
+      user,
+      searchText,
+      searchText
+    ]);
+    res.status(200).json({
+      user_id: user,
+      parcel: main,
+    });
+  } catch (error) {
+    console.error("Search error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
