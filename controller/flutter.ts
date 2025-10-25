@@ -142,29 +142,38 @@ router.get("/getaddress", async (req, res) => {
 router.post("/address/:user_id",async(req,res)=>{
   try{
     const user_id = req.params.user_id;
-    const address : Address = req.body;
+    const address = req.body; // สมมติว่า body มี address_text, address_latitude, address_longitude
+    
     if(!address || !user_id ){
-       return res.status(400).json({ error: "Missing address" });
+        return res.status(400).json({ error: "Missing address data or user ID" });
     }
-    const sql ='INSERT INTO `address` (`address_text`, `address_latitude`, `address_longitude`) VALUES (?,?,?);'
+    
+    // 1. INSERT ข้อมูลลงในตาราง 'address'
+    const sql = 'INSERT INTO `address` (`address_text`, `address_latitude`, `address_longitude`) VALUES (?,?,?);'
     const [result] = await conn.query<ResultSetHeader>(sql, [
       address.address_text,
       address.address_latitude,
       address.address_longitude
     ]);
+    
     const newAddresId = result.insertId;
-    const user_address = 'INSERT INTO `user_address` (`user_id`, `address_id`) VALUES (?,?);'
-    const [Uaddress] = await conn.query<ResultSetHeader>(user_address, [ 
+    
+    // 2. INSERT ข้อมูลลงในตาราง 'user_address' (แก้ไขการใช้ตัวแปร)
+    const user_address_sql = 'INSERT INTO `user_address` (`user_id`, `address_id`, `choose`) VALUES (?,?,?);'
+    const [Uaddress] = await conn.query<ResultSetHeader>(user_address_sql, [ 
       user_id,
-      user_address
+      newAddresId, // ⬅️ ต้องใช้ ID ที่เพิ่ง INSERT เข้าไป
+      'N'          // ⬅️ ระบุค่า choose ที่เป็น default
     ]);
-     res.status(201).json({
+    
+      res.status(201).json({
       message: "Address added and user updated successfully",
       address_id: newAddresId,
       affected_rows_address: result.affectedRows,
       affected_rows_UserAddress: Uaddress.affectedRows,
     });
   }catch(error){
+    console.error("Address POST error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -754,7 +763,22 @@ router.put("/edit/:user_id", async (req, res) => {
 router.get("/work", async (req, res) => {
   try{
     const sql = `
-    SELECT * FROM delivery WHERE delivery_status = 'waiting';
+    SELECT
+                d.delivery_id,
+                d.parcel_id,
+                d.rider_id,
+                d.delivery_status,
+                d.d_name,
+                d.address_id,
+                ps.photo_status_url
+            FROM
+                delivery d
+            LEFT JOIN
+                delivery_photo_status dps ON d.delivery_id = dps.delivery_id
+            LEFT JOIN
+                photo_status ps ON dps.photo_status_id = ps.photo_status_id AND ps.photo_status_tier = 'waiting'
+            WHERE
+                d.delivery_status = 'waiting';
     `;
     const work = await conn.query(sql);
     res.status(200).json({
@@ -819,4 +843,101 @@ WHERE
     res.status(500).json({ error: "Internal server error"});
   }
 })
+// หา rider id
+router.get("/riderProfile/:rider_id" ,async (req, res) => {
+  try{
+    const rider_id = req.params.rider_id;
 
+    if(!rider_id){
+      return res.status(400).json({ error: "Missing user ID" });
+    }
+    const sql = `
+    SELECT * FROM car WHERE rider_id = ?
+    `;
+    const [rider] = await conn.query<ResultSetHeader>(sql, [rider_id]);
+    res.status(200).json({
+      user_id: rider,
+    });
+  }catch(error){
+    console.error("Search error:", error);
+    res.status(500).json({ error: "Internal server error"});
+  }
+})
+// รับ rider id
+router.put("/rider/edit/:rider_id", async (req, res) => {
+    try {
+        const rider_id = req.params.rider_id;
+        // รับค่าใหม่จาก Flutter
+        const { name, phone, profileUrl, vehicleUrl, registration } = req.body;
+
+        if (!rider_id) {
+            return res.status(400).json({ error: "Missing Rider ID in request parameters." });
+        }
+
+        // --- 1. Fetch current rider data from 'car' table ---
+        const selectSql = `
+            SELECT rider_name, rider_phone, rider_profile, rider_vehicle, rider_registration
+            FROM car
+            WHERE rider_id = ?;
+        `;
+        
+        // 🚨 หมายเหตุ: ต้องแก้ Type Assertion ให้เหมาะสมกับ client ที่ใช้ (เช่น <RowDataPacket[]>[])
+        const [rows]: any = await conn.query(selectSql, [rider_id]);
+
+        if (rows.length === 0) {
+            return res.status(404).json({ error: "Rider not found." });
+        }
+
+        const currentData = rows[0];
+
+        // --- 2. Merge old data with new data ---
+        // ใช้ค่าใหม่ถ้ามีส่งมาและไม่ใช่ null/empty string, ไม่งั้นใช้ค่าเดิม
+        const newName = name || currentData.rider_name;
+        const newPhone = phone || currentData.rider_phone;
+        const newRegistration = registration || currentData.rider_registration;
+        
+        // จัดการ URL (ถ้าไม่ได้ส่งค่ามา (undefined) ให้ใช้ค่าเดิม ถ้าส่ง null มา ถือว่าต้องการล้างรูป)
+        const newProfileUrl = (profileUrl === undefined) ? currentData.rider_profile : profileUrl;
+        const newVehicleUrl = (vehicleUrl === undefined) ? currentData.rider_vehicle : vehicleUrl;
+
+        // --- 3. Execute the UPDATE query ---
+        if (!newName || !newPhone || !newRegistration) {
+             // Basic validation for mandatory fields (Name, Phone, Registration)
+             return res.status(400).json({ error: "Name, phone, and registration number are required fields." });
+        }
+
+        const updateSql = `
+            UPDATE car
+            SET
+                rider_name = ?,
+                rider_phone = ?,
+                rider_registration = ?,
+                rider_profile = ?,    -- รูปโปรไฟล์
+                rider_vehicle = ?     -- รูปภาพยานพาหนะ
+            WHERE
+                rider_id = ?;
+        `;
+
+        // 🚨 หมายเหตุ: ต้องแก้ Type Assertion ให้เหมาะสมกับ client ที่ใช้
+        const [result]: any = await conn.query(updateSql, [
+            newName,
+            newPhone,
+            newRegistration,
+            newProfileUrl,
+            newVehicleUrl,
+            rider_id,
+        ]);
+        
+        console.log(`Rider ${rider_id} profile updated. Rows affected: ${result.affectedRows}`);
+        
+        if (result.affectedRows === 0) {
+            return res.status(200).json({ message: "Profile updated successfully (or no changes were made)." });
+        }
+
+        return res.status(200).json({ message: "Profile updated successfully" });
+
+    } catch(error) {
+        console.error("Update rider profile error:", error);
+        res.status(500).json({ error: "Internal server error"});
+    }
+});
