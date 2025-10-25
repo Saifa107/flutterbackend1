@@ -74,17 +74,19 @@ router.post("/regisuser",async(req,res)=>{
   try{
     const user : User = req.body;
     console.log("📥 Register request:", user);
+    const DEFAULT_PROFILE_URL = 'https://cdn-icons-png.freepik.com/512/428/428573.png';
+    // 💡 5 คอลัมน์ (user_proflie, user_role ถูกกำหนดเป็น Literal String)
     const sql = `
       INSERT INTO user 
-        (user_name, user_phone, user_password, user_role) 
-      VALUES (?, ?, ?,'user')
+        (user_name, user_phone, user_password, user_proflie, user_role) 
+      VALUES (?, ?, ?, '${DEFAULT_PROFILE_URL}', 'user')
     `;
     const [result] = await conn.query<ResultSetHeader>(sql, [
-      user.user_name,
-      user.user_phone,
-      user.user_password,
-     
-    ]);
+      user.user_name,     // 1. user_name
+      user.user_phone,    // 2. user_phone
+      user.user_password, // 3. user_password
+    ]); // ⬅️ ส่ง 3 ค่า เข้า 3 Placeholder
+
     res.status(201).json({
       affected_row: result.affectedRows,
       last_idx: result.insertId,
@@ -93,23 +95,26 @@ router.post("/regisuser",async(req,res)=>{
     console.error("❌ Register error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
-})
+});
 //rigister rider
 router.post("/regisrider",async(req,res)=>{
   try{
     const rider : Rider = req.body;
     console.log("📥 Register request:", rider);
+    const DEFAULT_PROFILE_URL = 'https://cdn-icons-png.freepik.com/512/428/428573.png';
+    // 💡 6 คอลัมน์ (rider_profile, rider_role ถูกกำหนดเป็น Literal String)
     const sql = `
       INSERT INTO car
-        (rider_name, rider_phone,rider_registration,rider_password, rider_role) 
-      VALUES (?, ?, ?, ?,'rider')
+        (rider_name, rider_phone, rider_registration, rider_password, rider_profile, rider_role) 
+      VALUES (?, ?, ?, ?, '${DEFAULT_PROFILE_URL}', 'rider')
     `;
     const [result] = await conn.query<ResultSetHeader>(sql, [
-      rider.rider_name,
-      rider.rider_phone,
-      rider.rider_registration,
-      rider.rider_password
-    ]);
+      rider.rider_name,         // 1. rider_name
+      rider.rider_phone,        // 2. rider_phone
+      rider.rider_registration, // 3. rider_registration
+      rider.rider_password      // 4. rider_password
+    ]); // ⬅️ ส่ง 4 ค่า เข้า 4 Placeholder
+
     res.status(201).json({
       affected_row: result.affectedRows,
       last_idx: result.insertId,
@@ -118,7 +123,7 @@ router.post("/regisrider",async(req,res)=>{
     console.error("❌ Register error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
-})
+});
 //////////
 //          Address
 //////////
@@ -629,3 +634,189 @@ router.post("/getBoxSearch/:user_id", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+//////////
+//          profile (user)
+//////////
+router.get("/profile/:user_id", async (req, res) => {
+  try{
+     const user = req.params.user_id;
+      if (!user) {
+        return res.status(400).json({ error: "Missing user ID" });
+      }
+      const sql = `
+      SELECT
+    u.user_name,
+    u.user_phone,
+    u.user_proflie,
+    a.address_id,
+    a.address_text,
+    a.address_latitude,
+    a.address_longitude,
+    ua.choose AS is_default_address
+FROM 
+    user u
+LEFT JOIN 
+    user_address ua ON u.user_id = ua.user_id
+LEFT JOIN 
+    address a ON ua.address_id = a.address_id
+WHERE 
+    u.user_id = ?
+ORDER BY 
+    ua.choose DESC;
+      `;
+      const [profile] = await conn.query(sql, [
+      user,
+    ]);
+     res.status(200).json({
+      user_id: user,
+      profile: profile,
+    });
+  }catch(error){
+    console.error("Search error:", error);
+    res.status(500).json({ error: "Internal server error"});
+  }
+});
+// put ข้อมูล user
+router.put("/edit/:user_id", async (req, res) => {
+    try {
+        const user_id = req.params.user_id;
+        const { name, phone, profileUrl } = req.body;
+
+        if (!user_id) {
+            return res.status(400).json({ error: "Missing user ID in request parameters." });
+        }
+
+        // --- 1. Fetch current user data ---
+        const selectSql = `
+            SELECT user_name, user_phone, user_proflie
+            FROM user
+            WHERE user_id = ?;
+        `;
+        // Assuming 'conn' is your database connection object
+        const [rows] : any = await conn.query<ResultSetHeader>(selectSql, [user_id]);
+
+        if (rows.length === 0) {
+            return res.status(404).json({ error: "User not found." });
+        }
+
+        const currentData = rows[0];
+
+        // --- 2. Merge old data with new data ---
+        // Use the new value if provided, otherwise stick to the current (old) value.
+        const newName = name || currentData.user_name;
+        const newPhone = phone || currentData.user_phone;
+        // profileUrl can be explicitly sent as null to clear it, 
+        // or left undefined to keep the old URL.
+        const newProfileUrl = (profileUrl === undefined) ? currentData.user_proflie : profileUrl;
+
+
+        // --- 3. Execute the UPDATE query ---
+        if (!newName || !newPhone) {
+             // Basic validation for mandatory fields (name and phone)
+             return res.status(400).json({ error: "Name and phone are required fields and cannot be empty." });
+        }
+
+        const updateSql = `
+            UPDATE user
+            SET
+                user_name = ?,
+                user_phone = ?,
+                user_proflie = ?
+            WHERE
+                user_id = ?;
+        `;
+
+        const [result] = await conn.query<ResultSetHeader>(updateSql, [
+            newName,
+            newPhone,
+            newProfileUrl, // This handles null gracefully
+            user_id,
+        ]);
+        
+        console.log(`User ${user_id} profile updated. Rows affected: ${result.affectedRows}`);
+        
+        if (result.affectedRows === 0) {
+            // This might happen if the data was identical to what was sent, but it's good practice to check.
+             return res.status(200).json({ message: "Profile updated successfully (or no changes were made)." });
+        }
+
+        return res.status(200).json({ message: "Profile updated successfully" });
+
+    } catch(error) {
+        console.error("Update profile error:", error);
+        res.status(500).json({ error: "Internal server error"});
+    }
+});
+//////////
+//          rider รับงาน
+//////////
+// แสดงงานทั้งหมดที่ rider
+router.get("/work", async (req, res) => {
+  try{
+    const sql = `
+    SELECT * FROM delivery WHERE delivery_status = 'waiting';
+    `;
+    const work = await conn.query(sql);
+    res.status(200).json({
+      work : work,
+    });
+  }catch(error){
+    console.error("Search error:", error);
+    res.status(500).json({ error: "Internal server error"});
+  }
+});
+// ป้องกันการรับ 2 งาน
+router.post("/working/:rider_id" ,async (req, res) => {
+  try{
+    const rider_id = req.params.rider_id;
+    if(!rider_id){
+      return res.status(400).json({ error: "Missing user ID" });
+    }
+    const sql = `
+    SELECT
+    d.delivery_id,
+    d.d_name,
+    d.delivery_status
+FROM
+    delivery AS d
+WHERE
+    d.rider_id = ?
+    AND d.delivery_status IN ('received', 'delivered');
+    `;
+    const [working] = await conn.query<ResultSetHeader>(sql, [rider_id]);
+    res.status(200).json({
+      user_id: rider_id,
+      working: working,
+    });
+  }catch(error){
+    console.error("Search error:", error);
+    res.status(500).json({ error: "Internal server error"});
+  }
+})
+// rider รับงาน
+router.post("/goWork/:rider_id/:delivery_id" ,async (req, res) => {
+  try{
+    const rider_id = req.params.rider_id;
+    const delivery = req.params.delivery_id;
+    if(!rider_id || !delivery){
+      return res.status(400).json({ error: "Missing user ID" });
+    }
+    const sql = `
+    UPDATE delivery
+SET 
+    rider_id = ?,          
+    delivery_status = 'received' 
+WHERE 
+    delivery_id = ?;
+    `;
+    const [working] = await conn.query<ResultSetHeader>(sql, [rider_id,delivery]);
+    res.status(200).json({
+      user_id: rider_id,
+      working: working,
+    });
+  }catch(error){
+    console.error("Search error:", error);
+    res.status(500).json({ error: "Internal server error"});
+  }
+})
+
